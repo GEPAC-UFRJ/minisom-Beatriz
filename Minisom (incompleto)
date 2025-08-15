@@ -1,0 +1,91 @@
+#Minisom Beatriz (incompleto)
+
+import os
+import numpy as np
+import xarray as xr
+import matplotlib.pyplot as plt
+from minisom import MiniSom
+from skimage.metrics import structural_similarity as ssim
+from sklearn.preprocessing import StandardScaler
+import pandas as pd
+
+
+# Caminho do arquivo NetCDF
+path = "C:/Users/Beatrix/Desktop/chirps"
+filename = "anomalias_norm_chirps.nc"
+fullpath = os.path.join(path, filename)
+
+# Carregar dados com xarray
+ds = xr.open_dataset(fullpath)
+precip = ds[list(ds.data_vars)[0]] 
+
+# Verificar dimensões
+print("Dims:", precip.dims) 
+
+# Converter para numpy e normalizar
+data = precip.values  
+n_samples, n_lat, n_lon = data.shape
+
+# Flatten espacialmente 
+X = data.reshape(n_samples, n_lat * n_lon)
+
+# Normalizar 
+scaler = StandardScaler()
+X_norm = scaler.fit_transform(X)
+
+# Função de distância baseada em SSIM
+def ssim_distance(x, y):
+    # Garante que não tem NaN
+    x = np.nan_to_num(x)
+    y = np.nan_to_num(y)
+    # Normaliza os vetores para a escala certa no SSIM
+    x = (x - np.min(x)) / (np.max(x) - np.min(x) + 1e-8)
+    y = (y - np.min(y)) / (np.max(y) - np.min(y) + 1e-8)
+    # Calcula SSIM com janela menor 
+    score = ssim(x, y, data_range=1.0, win_size=7, gaussian_weights=True, sigma=1.5)
+    return 1 - score
+
+# Subclasse do MiniSom para usar SSIM
+class MiniSomSSIM(MiniSom):
+    def _activation_map(self, x):
+        """Calcula distâncias SSIM entre x e todos os pesos."""
+        d = np.zeros((self._weights.shape[0], self._weights.shape[1]))
+        for i in range(d.shape[0]):
+            for j in range(d.shape[1]):
+                d[i, j] = ssim_distance(x, self._weights[i, j])
+        return d
+
+# Criar e treinar o SOM
+som = MiniSomSSIM(x=6, y=6, input_len=n_lat * n_lon, sigma=1.0, learning_rate=0.5, random_seed=42)
+som.random_weights_init(X_norm)
+print("Treinando SOM...")
+som.train_random(X_norm, num_iteration=5000)
+print("Treinamento concluído.")
+
+# Salvar pesos
+np.save("pesos_som_ssim.npy", som._weights)
+
+# Mapas de ativação
+activation_coords = np.array([som.winner(x) for x in X_norm])
+activation_series = pd.DataFrame(activation_coords, columns=["neuron_x", "neuron_y"])
+activation_series["time"] = precip.time.values
+
+# Salvar mapa de ativação
+activation_series.to_csv("mapa_ativacao_neuronios.csv", index=False)
+print("Mapa de ativação salvo como CSV.")
+
+# Visualizar frequência de ativação por neurônio
+plt.figure(figsize=(6, 6))
+activation_map = np.zeros((6, 6))
+for i, j in activation_coords:
+    activation_map[i, j] += 1
+
+plt.imshow(activation_map, cmap='viridis')
+plt.colorbar(label='Frequência de ativação')
+plt.title('Mapa de Ativação dos Neurônios (SOM 6x6)')
+plt.xlabel('Neuron y')
+plt.ylabel('Neuron x')
+plt.savefig("mapa_ativacao_frequencia.png", dpi=300)
+plt.show()
+
+
