@@ -1,0 +1,496 @@
+"""
+Tratamento de Dados CHIRPS
+    por Beatriz Salz
+
+   Sumário:
+  1- descobrir lat/long
+  2- recortar arquivo por lat/long
+  3- plotar 
+  4- recortar arquivo com shapefile
+  5- plotar 
+  6- criar climatoligia 
+  7- calcular anomalia
+  8- detrendizar 
+  9- descobrir min máx
+  10- substituir NANs
+  11- normalizar de 0 a 1 
+  12- plotar
+
+IMPORTANTE!: Rode cada modulo do processamento individualmente, 
+ exceto nos casos onde as etapas são integradas e sinalizadas 
+                para serem utilizadas juntas.
+"""
+
+##importações
+import geopandas as gpd
+import os
+import xarray as xr
+import matplotlib.pyplot as plt
+import rioxarray # Importa a biblioteca para o recorte com o shapefile
+import numpy as np
+from scipy import signal
+
+
+######### EXTRA: Unificar arquivos para formar shapefile da região sudeste ###################################
+
+# Nomes dos arquivos de shapefile que você quer unificar
+file_paths = [
+    'SP_RG_Intermediarias_2024.shp',
+    'MG_RG_Intermediarias_2024.shp',
+    'RJ_RG_Intermediarias_2024.shp',
+    'ES_RG_Intermediarias_2024.shp'
+]
+
+gdf_list = []
+
+try:
+    for file in file_paths:
+        if not os.path.exists(file):
+            print(f"Erro: O arquivo '{file}' não foi encontrado. Verifique o nome e o caminho.")
+            continue
+        print(f"Lendo o arquivo: {file}")
+        gdf = gpd.read_file(file)
+        gdf_list.append(gdf)
+
+    if not gdf_list:
+        print("Nenhum arquivo foi lido com sucesso. O processo de unificação não pode continuar.")
+    else:
+        # 1. Concatena os GeoDataFrames em um único GeoDataFrame
+        gdf_sudeste = gpd.GeoDataFrame(
+            gpd.pd.concat(gdf_list, ignore_index=True),
+            crs=gdf_list[0].crs
+        )
+
+        # 2. Operação de dissolve
+        gdf_unificado = gdf_sudeste.dissolve(by=None)
+
+        # Define o nome do novo shapefile unificado e dissolvido
+        output_file = 'regiao_sudeste_unificada.shp'
+
+        # Salva o novo shapefile
+        gdf_unificado.to_file(output_file, driver='ESRI Shapefile')
+
+        print("\nProcesso concluído com sucesso!")
+        print(f"O shapefile unificado '{output_file}' foi criado na sua pasta.")
+        print("Ele contém um único polígono para toda a região Sudeste.")
+
+except Exception as e:
+    print(f"Ocorreu um erro: {e}")
+
+###########################################################################################################
+
+
+
+## 1- descobrir lat/long
+
+shapefile_path = 'regiao_sudeste_unificada.shp'
+
+try:
+    # lê o shapefile
+    gdf = gpd.read_file(shapefile_path)
+
+    # o atributo 'total_bounds' retorna as coordenadas
+    min_lon, min_lat, max_lon, max_lat = gdf.total_bounds
+
+    print("Coordenadas da região Sudeste:")
+    print(f"Latitude Mínima: {min_lat}")
+    print(f"Latitude Máxima: {max_lat}")
+    print(f"Longitude Mínima: {min_lon}")
+    print(f"Longitude Máxima: {max_lon}")
+
+except FileNotFoundError:
+    print(f"Erro: O arquivo '{shapefile_path}' não foi encontrado. Verifique o nome e se ele está na pasta correta.")
+except Exception as e:
+    print(f"Ocorreu um erro: {e}")
+
+
+
+## 2- recortar arquivo por lat/long (utilizar etapas 2 e 3 juntas)
+
+file_chirps_original = 'chirps-v2.0.monthly.nc'
+
+# coordenadas obtidas no shapefile regiao_sudeste_unificada.shp
+lat_min = -27
+lat_max = -13
+lon_min = -55
+lon_max = -37
+
+#originais:
+#lat_min = -25.3579998
+#lat_max = -14.2331807
+#lon_min = -53.1101115
+#lon_max = -28.8476399
+
+
+try:
+    # abre o arquivo CHIRPS original
+    ds = xr.open_dataset(file_chirps_original)
+
+    # recorta o dataset usando as coordenadas de latitude e longitude
+    ds_recortado = ds.sel(latitude=slice(lat_min, lat_max),
+                          longitude=slice(lon_min, lon_max))
+
+    # salva o novo arquivo recortado
+    output_file = 'chirps_recorte_latlon.nc'
+    ds_recortado.to_netcdf(output_file)
+
+    print("\nProcesso de recorte concluído com sucesso!")
+    print(f"O arquivo '{output_file}' foi criado.")
+
+
+
+## 3- plotar 
+    
+    # identifica o nome da variável de dados (geralmente 'precip')
+    data_var_name = list(ds_recortado.data_vars)[0]
+    
+    # seleciona o primeiro instante de tempo para visualização
+    data_to_plot = ds_recortado[data_var_name].isel(time=0)
+
+    # plota o mapa
+    plt.figure(figsize=(10, 8))
+    data_to_plot.plot()
+    
+    # adiciona títulos e rótulos
+    plt.title('Recorte Inicial por Latitude e Longitude')
+    plt.xlabel('Longitude')
+    plt.ylabel('Latitude')
+    
+    # salva a figura em um arquivo
+    plt.savefig('recorte_latlon_mapa.png')
+    
+    # mostra o plot
+    plt.show()
+
+    print("Mapa de visualização criado e salvo como 'recorte_latlon_mapa.png'.")
+
+except FileNotFoundError:
+    print(f"Erro: O arquivo '{file_chirps_original}' não foi encontrado. Verifique o nome e o caminho.")
+except Exception as e:
+    print(f"Ocorreu um erro: {e}")
+
+
+
+## 4- recortar arquivo com shapefile (etapa 5 está integrada a etapa 4)
+
+# Arquivos de entrada
+file_chirps_latlon = 'chirps_recorte_latlon.nc'
+file_shape = 'regiao_sudeste_unificada.shp'
+
+try:
+    # 1. Carrega os arquivos
+    ds = xr.open_dataset(file_chirps_latlon)
+    gdf_sudeste = gpd.read_file(file_shape)
+
+    # 2. Recorta os dados e armazena o resultado em uma variável
+    ds.rio.write_crs(gdf_sudeste.crs, inplace=True)
+    ds_recortado = ds.rio.clip(gdf_sudeste.geometry, ds.rio.crs, all_touched=False)
+
+    # --- INÍCIO DA VERIFICAÇÃO ---
+    print("\nVerificando a dimensão de tempo...")
+    if 'time' in ds_recortado.dims:
+        print("Dimensão 'time' preservada com sucesso!")
+        data_to_plot = ds_recortado[list(ds_recortado.data_vars)[0]].isel(time=0)
+    else:
+        print("Aviso: Dimensão 'time' não encontrada.")
+        data_to_plot = ds_recortado[list(ds_recortado.data_vars)[0]]
+    # --- FIM DA VERIFICAÇÃO ---
+
+
+    # 5- plota os dados da variável diretamente da memória
+    lat_min = data_to_plot.latitude.min().item()
+    lat_max = data_to_plot.latitude.max().item()
+    lon_min = data_to_plot.longitude.min().item()
+    lon_max = data_to_plot.longitude.max().item()
+    aspect_ratio = (lon_max - lon_min) / (lat_max - lat_min)
+    figsize = (10, 10 / aspect_ratio)
+
+    plt.figure(figsize=figsize)
+    data_to_plot.plot()
+    
+    plt.title('Recorte Final com Shapefile Corrigido')
+    plt.xlabel('Longitude')
+    plt.ylabel('Latitude')
+    
+    output_filename = 'recorte_sudeste_mapa.png'
+    plt.savefig(output_filename)
+    plt.show()
+
+    print(f"\nMapa criado e salvo como '{output_filename}'.")
+
+    # 4. Salva o arquivo no disco (opcional)
+    output_file = 'chirps_recorte_sudeste.nc'
+    ds_recortado.to_netcdf(output_file)
+    print(f"O arquivo '{output_file}' foi criado.")
+
+except FileNotFoundError as e:
+    print(f"Erro: O arquivo não foi encontrado. Verifique se '{e.filename}' existe na pasta.")
+except Exception as e:
+    print(f"Ocorreu um erro: {e}")
+
+
+
+## 6- criar climatologia
+
+# cria a partir do recorte latlong pq eu ainda n descobri oq aconteceu
+# a variavel 'time' durante o recorte sudeste
+file_recorte_latlong = 'chirps_recorte_sudeste.nc'
+
+try:
+    # abre o arquivo com os dados recortados
+    ds_recortado_latlon = xr.open_dataset(file_recorte_latlong)
+    
+    # identifica o nome da variável de dados (geralmente 'precip')
+    data_var_name = list(ds_recortado_latlon.data_vars)[0]
+
+    # calcula a média mensal para cada mês do ano para criar a climatologia
+    climatologia = ds_recortado_latlon[data_var_name].groupby('time.month').mean(dim='time')
+    
+    # salva a climatologia em um novo arquivo
+    climatologia.to_netcdf('climatologia_sudeste.nc')
+
+    print("\nProcesso de criação da climatologia concluído com sucesso!")
+    print("O arquivo 'climatologia_sudeste.nc' foi salvo.")
+
+except FileNotFoundError:
+    print(f"Erro: O arquivo '{file_recorte_latlong}' não foi encontrado.")
+except Exception as e:
+    print(f"Ocorreu um erro: {e}")
+
+
+
+## 7- calcular anomalia
+
+# arquivo com a série temporal completa recortada por lat/lon
+file_dados = 'chirps_recorte_sudeste.nc'
+
+# arquivo com a climatologia que acabamos de criar
+file_clima = 'climatologia_sudeste.nc'
+
+try:
+    # carrega os datasets
+    ds_dados = xr.open_dataset(file_dados)
+    ds_clima = xr.open_dataset(file_clima)
+    
+    # identifica o nome da variável de dados
+    data_var_name = list(ds_dados.data_vars)[0]
+
+    # subtrai a climatologia dos dados
+    # o comando .groupby('time.month') - ds_clima[data_var_name]
+    # faz a mágica de alinhar a subtração mês a mês.
+    anomalia = ds_dados[data_var_name].groupby('time.month') - ds_clima[data_var_name]
+
+    # salva o novo arquivo com a anomalia
+    output_file = 'anomalia_sudeste.nc'
+    anomalia.to_netcdf(output_file)
+
+    print("\nProcesso de cálculo da anomalia concluído com sucesso!")
+    print(f"O arquivo '{output_file}' foi criado.")
+
+except FileNotFoundError as e:
+    print(f"Erro: O arquivo '{e.filename}' não foi encontrado.")
+except Exception as e:
+    print(f"Ocorreu um erro: {e}")
+
+
+
+## 8- detrendizar 
+
+# arquivo com a anomalia já calculada
+file_anomalia = 'anomalia_sudeste.nc'
+
+try:
+    # abre o arquivo de anomalias
+    ds_anomalia = xr.open_dataset(file_anomalia)
+    
+    # identifica o nome da variável de dados
+    data_var_name = list(ds_anomalia.data_vars)[0]
+    
+    # extrai os dados
+    anomalia_data = ds_anomalia[data_var_name]
+
+    # prepara um array para os dados detrendizados
+    anomalia_detrendizada = anomalia_data.copy()
+
+    # prepara o array de tempo para o fit da regressão linear
+    time_steps = np.arange(len(anomalia_data.time))
+
+    # itera sobre cada ponto de grade para calcular e remover a tendência
+    for lat in anomalia_data.latitude:
+        for lon in anomalia_data.longitude:
+            # seleciona a série temporal de um único ponto
+            series = anomalia_data.sel(latitude=lat, longitude=lon)
+            
+            # remove os valores NaN para o cálculo da tendência
+            non_nan_indices = ~np.isnan(series.values)
+            if np.sum(non_nan_indices) > 2: # Precisa de pelo menos 2 pontos para a regressão
+                valid_time_steps = time_steps[non_nan_indices]
+                valid_series = series.values[non_nan_indices]
+
+                # aplica a detrendização usando a função `signal.detrend`
+                detrended_series = signal.detrend(valid_series)
+                
+                # atualiza o array detrendizado
+                anomalia_detrendizada.loc[dict(latitude=lat, longitude=lon, time=series.time[non_nan_indices])] = detrended_series
+
+    # salva o novo arquivo com os dados detrendizados
+    anomalia_detrendizada.to_netcdf('anomalia_detrendizada.nc')
+
+    print("\nProcesso de detrendização concluído com sucesso!")
+    print("O arquivo 'anomalia_detrendizada.nc' foi criado.")
+
+except FileNotFoundError:
+    print(f"Erro: O arquivo '{file_anomalia}' não foi encontrado.")
+except Exception as e:
+    print(f"Ocorreu um erro: {e}")
+
+    import xarray as xr
+
+
+
+## 9- descobrir min máx
+
+# nome do arquivo com a anomalia detrendizada
+file_detrend = 'anomalia_detrendizada.nc'
+
+try:
+    # abre o arquivo
+    ds_detrend = xr.open_dataset(file_detrend)
+
+    # identifica o nome da variável de dados
+    data_var_name = list(ds_detrend.data_vars)[0]
+
+    # calcula o mínimo e o máximo dos dados, ignorando os NaNs
+    min_anomalia = ds_detrend[data_var_name].min(skipna=True).item()
+    max_anomalia = ds_detrend[data_var_name].max(skipna=True).item()
+
+    print("\nValores de anomalia detrendizada da região Sudeste:")
+    print(f"Mínimo: {min_anomalia}")
+    print(f"Máximo: {max_anomalia}")
+
+except FileNotFoundError:
+    print(f"Erro: O arquivo '{file_detrend}' não foi encontrado.")
+except Exception as e:
+    print(f"Ocorreu um erro: {e}")
+
+#Resposta
+#Valores de anomalia detrendizada da região Sudeste:
+#Minimo: -287.6938781738281
+#Miximo: 808.0424194335938
+
+
+
+## 10- substituir NANs
+
+# nome do arquivo de anomalia detrendizada que você acabou de criar
+file_detrend = 'anomalia_detrendizada.nc'
+
+# valor que usaremos para substituir os NaNs
+valor_para_nan = -290.0
+
+try:
+    # abre o arquivo
+    ds_detrend = xr.open_dataset(file_detrend)
+    
+    # preenche os NaNs com o valor escolhido
+    ds_preenchido = ds_detrend.fillna(valor_para_nan)
+    
+    # salva o novo arquivo sem NaNs
+    ds_preenchido.to_netcdf('anomalia_detrendizada_preenchida.nc')
+
+    print("\nProcesso de substituição de NaNs concluído com sucesso!")
+    print(f"O arquivo 'anomalia_detrendizada_preenchida.nc' foi criado.")
+    print(f"Os valores NaN foram substituídos por: {valor_para_nan}")
+
+except FileNotFoundError:
+    print(f"Erro: O arquivo '{file_detrend}' não foi encontrado.")
+except Exception as e:
+    print(f"Ocorreu um erro: {e}")
+
+
+
+## 11- normalizar de 0 a 1 
+
+# nome do arquivo que foi criado na etapa anterior
+file_preenchido = 'anomalia_detrendizada_preenchida.nc'
+
+try:
+    # abre o arquivo com os NaNs preenchidos
+    ds = xr.open_dataset(file_preenchido)
+
+    # identifica o nome da variável de dados
+    data_var_name = list(ds.data_vars)[0]
+
+    # calcula o novo mínimo e máximo de TODO o dataset
+    min_total = ds[data_var_name].min(skipna=True).item()
+    max_total = ds[data_var_name].max(skipna=True).item()
+
+    print(f"O valor mínimo total para normalização é: {min_total}")
+    print(f"O valor máximo total para normalização é: {max_total}")
+
+    # aplica a fórmula de normalização
+    ds_normalizado = (ds[data_var_name] - min_total) / (max_total - min_total)
+    
+    # cria um novo Dataset com a variável normalizada
+    ds_final = xr.Dataset({data_var_name: ds_normalizado})
+    
+    # salva o arquivo final
+    ds_final.to_netcdf('anomalia_normalizada_final.nc')
+
+    print("\nProcesso de normalização concluído com sucesso!")
+    print("O arquivo 'anomalia_normalizada_final.nc' está pronto para ser usado no seu MiniSOM.")
+
+except FileNotFoundError:
+    print(f"Erro: O arquivo '{file_preenchido}' não foi encontrado.")
+except Exception as e:
+    print(f"Ocorreu um erro durante a normalização: {e}")
+
+
+
+## 12- plot final
+
+# nome do arquivo final normalizado
+file_to_plot = 'anomalia_normalizada_final.nc'
+
+try:
+    # abre o arquivo NetCDF
+    ds = xr.open_dataset(file_to_plot)
+
+    # identifica o nome da variável de dados (geralmente 'precip')
+    data_var_name = list(ds.data_vars)[0]
+    
+    # seleciona o primeiro instante de tempo
+    data_to_plot = ds[data_var_name].isel(time=0)
+
+    # extrai os limites de latitude e longitude do dataset
+    lat_min = data_to_plot.latitude.min().item()
+    lat_max = data_to_plot.latitude.max().item()
+    lon_min = data_to_plot.longitude.min().item()
+    lon_max = data_to_plot.longitude.max().item()
+
+    # calcula a proporção da figura com base nos limites geográficos
+    aspect_ratio = (lon_max - lon_min) / (lat_max - lat_min)
+    figsize = (10, 10 / aspect_ratio)
+
+    # plota o mapa com a proporção corrigida e uma barra de cores
+    plt.figure(figsize=figsize)
+    data_to_plot.plot()
+    
+    # adiciona títulos e rótulos
+    plt.title(f'Mapa de Anomalia Normalizada da Região Sudeste')
+    plt.xlabel('Longitude')
+    plt.ylabel('Latitude')
+    
+    # salva a figura em um arquivo
+    output_filename = 'mapa_anomalia_normalizada_final.png'
+    plt.savefig(output_filename)
+    
+    # mostra o plot
+    plt.show()
+
+    print(f"Mapa final criado e salvo como '{output_filename}'.")
+
+except FileNotFoundError:
+    print(f"Erro: O arquivo '{file_to_plot}' não foi encontrado.")
+except Exception as e:
+    print(f"Ocorreu um erro: {e}")
